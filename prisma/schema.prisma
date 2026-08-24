@@ -1,0 +1,484 @@
+// Ticket Booking System — Prisma schema
+// ---------------------------------------------------------------------------
+// Design reference: docs/DESIGN.md §2 (database design).
+//
+// Modelling notes that matter:
+//  * Availability is per SHOW, not per physical seat -> ShowSeat is the row that
+//    carries availability/hold/booking state and is the locus of all concurrency
+//    control (see docs/DESIGN.md §3).
+//  * Money is stored in integer minor units (cents).
+//  * Timestamps are timestamptz; expiry is always evaluated against DB now().
+//  * Some guarantees (partial unique indexes for "one live X") cannot be
+//    expressed in Prisma schema syntax and are added in a raw-SQL migration:
+//    prisma/migrations/**/partial_constraints.sql. They are documented inline.
+// ---------------------------------------------------------------------------
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// =========================================================================
+// Enums
+// =========================================================================
+
+enum UserRole {
+  CUSTOMER
+  ORGANISER
+  ADMIN
+}
+
+enum EventType {
+  MOVIE
+  CONCERT
+}
+
+enum EventStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
+enum ShowStatus {
+  SCHEDULED
+  CANCELLED
+  COMPLETED
+}
+
+enum ShowSeatStatus {
+  AVAILABLE
+  HELD
+  BOOKED
+  BLOCKED
+}
+
+enum HoldStatus {
+  ACTIVE
+  CONVERTED
+  EXPIRED
+  RELEASED
+}
+
+enum HoldOrigin {
+  SELECTION
+  WAITLIST_OFFER
+}
+
+enum BookingStatus {
+  PENDING
+  CONFIRMED
+  CANCELLED
+  EXPIRED
+}
+
+enum PaymentStatus {
+  UNPAID
+  PAID
+  REFUNDED
+}
+
+enum BookingSource {
+  DIRECT
+  WAITLIST
+}
+
+enum WaitlistStatus {
+  WAITING
+  OFFERED
+  BOOKED
+  EXPIRED
+  CANCELLED
+}
+
+enum OfferStatus {
+  PENDING
+  ACCEPTED
+  EXPIRED
+  DECLINED
+}
+
+enum EmailStatus {
+  PENDING
+  SENT
+  FAILED
+}
+
+enum EmailTemplate {
+  BOOKING_CONFIRMATION
+  WAITLIST_OFFER
+  CANCELLATION
+}
+
+// =========================================================================
+// Identity & auth
+// =========================================================================
+
+model User {
+  id              String    @id @default(uuid()) @db.Uuid
+  email           String    @unique
+  passwordHash    String    @map("password_hash")
+  role            UserRole  @default(CUSTOMER)
+  fullName        String    @map("full_name")
+  emailVerifiedAt DateTime? @map("email_verified_at") @db.Timestamptz(6)
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  refreshTokens   RefreshToken[]
+  venuesCreated   Venue[]         @relation("VenueCreatedBy")
+  events          Event[]
+  seatHolds       SeatHold[]
+  bookings        Booking[]
+  waitlistEntries WaitlistEntry[]
+  waitlistOffers  WaitlistOffer[]
+  emailLogs       EmailLog[]
+
+  @@index([role])
+  @@map("users")
+}
+
+model RefreshToken {
+  id         String    @id @default(uuid()) @db.Uuid
+  userId     String    @map("user_id") @db.Uuid
+  tokenHash  String    @unique @map("token_hash")
+  expiresAt  DateTime  @map("expires_at") @db.Timestamptz(6)
+  revokedAt  DateTime? @map("revoked_at") @db.Timestamptz(6)
+  replacedBy String?   @map("replaced_by") @db.Uuid
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("refresh_tokens")
+}
+
+// =========================================================================
+// Venue / physical layout (admin-managed)
+// =========================================================================
+
+model Venue {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String
+  address   String?
+  city      String
+  timezone  String   @default("UTC")
+  createdBy String?  @map("created_by") @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  creator        User?          @relation("VenueCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
+  seatCategories SeatCategory[]
+  seats          Seat[]
+  shows          Show[]
+
+  @@index([city])
+  @@map("venues")
+}
+
+model SeatCategory {
+  id        String   @id @default(uuid()) @db.Uuid
+  venueId   String   @map("venue_id") @db.Uuid
+  name      String
+  color     String   @default("#64748b")
+  rank      Int      @default(0)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  venue           Venue           @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  seats           Seat[]
+  showPricing     ShowPricing[]
+  showSeats       ShowSeat[]
+  bookingSeats    BookingSeat[]
+  waitlistEntries WaitlistEntry[]
+
+  // A category name is unique within a venue.
+  @@unique([venueId, name])
+  @@index([venueId])
+  @@map("seat_categories")
+}
+
+model Seat {
+  id             String   @id @default(uuid()) @db.Uuid
+  venueId        String   @map("venue_id") @db.Uuid
+  seatCategoryId String   @map("seat_category_id") @db.Uuid
+  section        String   @default("Main")
+  rowLabel       String   @map("row_label")
+  seatNumber     Int      @map("seat_number")
+  x              Int
+  y              Int
+  isAccessible   Boolean  @default(false) @map("is_accessible")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  venue     Venue        @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  category  SeatCategory @relation(fields: [seatCategoryId], references: [id], onDelete: Restrict)
+  showSeats ShowSeat[]
+
+  // One physical seat per (venue, section, row, number).
+  @@unique([venueId, section, rowLabel, seatNumber])
+  @@index([venueId])
+  @@index([seatCategoryId])
+  @@map("seats")
+}
+
+// =========================================================================
+// Events & shows (organiser-managed)
+// =========================================================================
+
+model Event {
+  id          String      @id @default(uuid()) @db.Uuid
+  organiserId String      @map("organiser_id") @db.Uuid
+  title       String
+  description String?
+  type        EventType
+  posterUrl   String?     @map("poster_url")
+  status      EventStatus @default(DRAFT)
+  genre       String?
+  createdAt   DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime    @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  organiser User   @relation(fields: [organiserId], references: [id], onDelete: Cascade)
+  shows     Show[]
+
+  @@index([status])
+  @@index([type])
+  @@index([organiserId])
+  @@map("events")
+}
+
+model Show {
+  id           String     @id @default(uuid()) @db.Uuid
+  eventId      String     @map("event_id") @db.Uuid
+  venueId      String     @map("venue_id") @db.Uuid
+  startsAt     DateTime   @map("starts_at") @db.Timestamptz(6)
+  endsAt       DateTime?  @map("ends_at") @db.Timestamptz(6)
+  status       ShowStatus @default(SCHEDULED)
+  salesOpenAt  DateTime?  @map("sales_open_at") @db.Timestamptz(6)
+  salesCloseAt DateTime?  @map("sales_close_at") @db.Timestamptz(6)
+  currency     String     @default("USD")
+  createdAt    DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime   @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  event           Event           @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  venue           Venue           @relation(fields: [venueId], references: [id], onDelete: Restrict)
+  pricing         ShowPricing[]
+  showSeats       ShowSeat[]
+  bookings        Booking[]
+  seatHolds       SeatHold[]
+  waitlistEntries WaitlistEntry[]
+  waitlistOffers  WaitlistOffer[]
+
+  @@index([eventId])
+  @@index([venueId])
+  @@index([startsAt])
+  @@map("shows")
+}
+
+model ShowPricing {
+  id             String   @id @default(uuid()) @db.Uuid
+  showId         String   @map("show_id") @db.Uuid
+  seatCategoryId String   @map("seat_category_id") @db.Uuid
+  priceCents     Int      @map("price_cents")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  show     Show         @relation(fields: [showId], references: [id], onDelete: Cascade)
+  category SeatCategory @relation(fields: [seatCategoryId], references: [id], onDelete: Restrict)
+
+  // Exactly one price per (show, category).
+  @@unique([showId, seatCategoryId])
+  @@index([showId])
+  @@map("show_pricing")
+}
+
+// =========================================================================
+// ShowSeat — availability state per (show, seat). The concurrency hot spot.
+// =========================================================================
+
+model ShowSeat {
+  id             String         @id @default(uuid()) @db.Uuid
+  showId         String         @map("show_id") @db.Uuid
+  seatId         String         @map("seat_id") @db.Uuid
+  seatCategoryId String         @map("seat_category_id") @db.Uuid
+  status         ShowSeatStatus @default(AVAILABLE)
+  heldBy         String?        @map("held_by") @db.Uuid
+  holdId         String?        @map("hold_id") @db.Uuid
+  holdExpiresAt  DateTime?      @map("hold_expires_at") @db.Timestamptz(6)
+  bookingId      String?        @map("booking_id") @db.Uuid
+  version        Int            @default(0)
+  createdAt      DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime       @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  show         Show          @relation(fields: [showId], references: [id], onDelete: Cascade)
+  seat         Seat          @relation(fields: [seatId], references: [id], onDelete: Restrict)
+  category     SeatCategory  @relation(fields: [seatCategoryId], references: [id], onDelete: Restrict)
+  hold         SeatHold?     @relation(fields: [holdId], references: [id], onDelete: SetNull)
+  booking      Booking?      @relation(fields: [bookingId], references: [id], onDelete: SetNull)
+  bookingSeats BookingSeat[]
+
+  // Exactly one availability row per seat per show. This unique constraint is
+  // itself a concurrency safeguard (docs/DESIGN.md §2.9, §3.1).
+  @@unique([showId, seatId])
+  @@index([showId, status])
+  @@index([showId, seatCategoryId, status])
+  @@index([heldBy])
+  // A partial index on (hold_expires_at) WHERE status = 'HELD' is added in the
+  // raw-SQL migration so the sweeper can find expired holds cheaply.
+  @@map("show_seats")
+}
+
+// =========================================================================
+// Seat holds
+// =========================================================================
+
+model SeatHold {
+  id        String     @id @default(uuid()) @db.Uuid
+  userId    String     @map("user_id") @db.Uuid
+  showId    String     @map("show_id") @db.Uuid
+  status    HoldStatus @default(ACTIVE)
+  origin    HoldOrigin @default(SELECTION)
+  expiresAt DateTime   @map("expires_at") @db.Timestamptz(6)
+  createdAt DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime   @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user      User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  show      Show           @relation(fields: [showId], references: [id], onDelete: Cascade)
+  showSeats ShowSeat[]
+  offer     WaitlistOffer?
+
+  @@index([userId, status])
+  @@index([showId, status])
+  // Partial index on (expires_at) WHERE status = 'ACTIVE' added in raw-SQL migration.
+  @@map("seat_holds")
+}
+
+// =========================================================================
+// Bookings
+// =========================================================================
+
+model Booking {
+  id             String        @id @default(uuid()) @db.Uuid
+  userId         String        @map("user_id") @db.Uuid
+  showId         String        @map("show_id") @db.Uuid
+  reference      String        @unique
+  ticketToken    String        @unique @map("ticket_token")
+  status         BookingStatus @default(PENDING)
+  paymentStatus  PaymentStatus @default(UNPAID) @map("payment_status")
+  source         BookingSource @default(DIRECT)
+  totalCents     Int           @map("total_cents")
+  idempotencyKey String?       @map("idempotency_key")
+  checkedInAt    DateTime?     @map("checked_in_at") @db.Timestamptz(6)
+  cancelledAt    DateTime?     @map("cancelled_at") @db.Timestamptz(6)
+  createdAt      DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime      @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  show         Show          @relation(fields: [showId], references: [id], onDelete: Restrict)
+  bookingSeats BookingSeat[]
+  showSeats    ShowSeat[]
+
+  // A user's idempotency key is unique (prevents duplicate bookings on retry).
+  @@unique([userId, idempotencyKey])
+  @@index([userId, createdAt])
+  @@index([showId])
+  @@map("bookings")
+}
+
+model BookingSeat {
+  id             String   @id @default(uuid()) @db.Uuid
+  bookingId      String   @map("booking_id") @db.Uuid
+  showSeatId     String   @map("show_seat_id") @db.Uuid
+  seatCategoryId String   @map("seat_category_id") @db.Uuid
+  priceCents     Int      @map("price_cents")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  booking  Booking      @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  showSeat ShowSeat     @relation(fields: [showSeatId], references: [id], onDelete: Restrict)
+  category SeatCategory @relation(fields: [seatCategoryId], references: [id], onDelete: Restrict)
+
+  // A show seat may appear at most once per booking. A stronger "at most once
+  // across all *active* bookings" guard is a partial unique index added in the
+  // raw-SQL migration (docs/DESIGN.md §2.12).
+  @@unique([bookingId, showSeatId])
+  @@index([bookingId])
+  @@index([showSeatId])
+  @@map("booking_seats")
+}
+
+// =========================================================================
+// Waitlist
+// =========================================================================
+
+model WaitlistEntry {
+  id             String         @id @default(uuid()) @db.Uuid
+  userId         String         @map("user_id") @db.Uuid
+  showId         String         @map("show_id") @db.Uuid
+  seatCategoryId String         @map("seat_category_id") @db.Uuid
+  quantity       Int            @default(1)
+  status         WaitlistStatus @default(WAITING)
+  createdAt      DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime       @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user     User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  show     Show            @relation(fields: [showId], references: [id], onDelete: Cascade)
+  category SeatCategory    @relation(fields: [seatCategoryId], references: [id], onDelete: Restrict)
+  offers   WaitlistOffer[]
+
+  // FIFO scan for the next eligible entry.
+  @@index([showId, seatCategoryId, status, createdAt])
+  @@index([userId])
+  // A partial unique index "one live entry per (show, category, user)" is added
+  // in the raw-SQL migration (status IN ('WAITING','OFFERED')).
+  @@map("waitlist_entries")
+}
+
+model WaitlistOffer {
+  id              String      @id @default(uuid()) @db.Uuid
+  waitlistEntryId String      @map("waitlist_entry_id") @db.Uuid
+  userId          String      @map("user_id") @db.Uuid
+  showId          String      @map("show_id") @db.Uuid
+  seatHoldId      String?     @unique @map("seat_hold_id") @db.Uuid
+  bookingId       String?     @map("booking_id") @db.Uuid
+  status          OfferStatus @default(PENDING)
+  expiresAt       DateTime    @map("expires_at") @db.Timestamptz(6)
+  createdAt       DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime    @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  entry    WaitlistEntry @relation(fields: [waitlistEntryId], references: [id], onDelete: Cascade)
+  user     User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  show     Show          @relation(fields: [showId], references: [id], onDelete: Cascade)
+  seatHold SeatHold?     @relation(fields: [seatHoldId], references: [id], onDelete: SetNull)
+
+  @@index([status, expiresAt])
+  @@index([userId, status])
+  // Partial unique index "one PENDING offer per entry" added in raw-SQL migration.
+  @@map("waitlist_offers")
+}
+
+// =========================================================================
+// Email outbox
+// =========================================================================
+
+model EmailLog {
+  id                String        @id @default(uuid()) @db.Uuid
+  userId            String?       @map("user_id") @db.Uuid
+  bookingId         String?       @map("booking_id") @db.Uuid
+  toEmail           String        @map("to_email")
+  template          EmailTemplate
+  status            EmailStatus   @default(PENDING)
+  providerMessageId String?       @map("provider_message_id")
+  attempts          Int           @default(0)
+  lastError         String?       @map("last_error")
+  sentAt            DateTime?     @map("sent_at") @db.Timestamptz(6)
+  createdAt         DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime      @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([status, createdAt])
+  @@map("email_log")
+}
