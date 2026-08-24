@@ -1,10 +1,11 @@
-import { randomBytes } from 'node:crypto';
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { Errors } from '@/lib/errors';
 import { runInTransaction } from '@/server/db/transaction';
 import { showSeatRepository } from '@/server/repositories/show-seat.repository';
 import { publishSeatUpdates } from '@/server/realtime/seat-events';
+import { generateReference, generateTicketToken } from '@/server/booking/reference';
+import { notifications } from '@/server/email/notifications';
 
 /**
  * Booking (checkout) engine — converts a live, owned hold into a confirmed
@@ -24,20 +25,6 @@ export interface BookingResult {
   showId: string;
   seatIds: string[];
   replayed: boolean;
-}
-
-// Human-readable reference, e.g. "BK-7F3K9Q2M". Base32 (no ambiguous chars).
-const REF_ALPHABET = 'ABCDEFGHJKMNPQRSTVWXYZ23456789';
-function generateReference(): string {
-  const bytes = randomBytes(8);
-  let out = '';
-  for (let i = 0; i < 8; i += 1) out += REF_ALPHABET[bytes[i]! % REF_ALPHABET.length];
-  return `BK-${out}`;
-}
-
-// Opaque, unguessable QR ticket token (never encodes PII).
-function generateTicketToken(): string {
-  return randomBytes(24).toString('base64url');
 }
 
 async function loadBookingResult(bookingId: string, replayed: boolean): Promise<BookingResult> {
@@ -164,11 +151,12 @@ export const bookingService = {
       throw err;
     }
 
-    // Publish BOOKED updates only after commit.
+    // Publish BOOKED updates and send the confirmation email — both after commit.
     await publishSeatUpdates(
       result.showId,
       result.seatIds.map((id) => ({ showSeatId: id, status: 'BOOKED' as const })),
     );
+    await notifications.bookingConfirmation(result.bookingId);
 
     return loadBookingResult(result.bookingId, false);
   },

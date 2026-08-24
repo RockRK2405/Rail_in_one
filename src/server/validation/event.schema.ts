@@ -7,6 +7,10 @@ export const eventListQuerySchema = z.object({
   type: z.enum(['MOVIE', 'CONCERT']).optional(),
   city: z.string().trim().min(1).max(120).optional(),
   q: z.string().trim().min(1).max(120).optional(),
+  date: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/, 'Date must be YYYY-MM-DD')
+    .optional(),
   page: z.coerce.number().int().positive().default(1),
   pageSize: z.coerce
     .number()

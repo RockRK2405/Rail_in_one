@@ -7,15 +7,21 @@ offers, QR e-tickets, and role-based access control.
 Built with **Next.js (App Router) · TypeScript · PostgreSQL · Prisma · Tailwind
 CSS · shadcn/ui · Zod · Vitest**.
 
-> **Status: Phases 1–2 complete.**
+> **Status: Phases 1–3 complete.**
 > **Phase 1** — project foundation, full database schema, authentication + RBAC,
 > seed data, the initial API layer, and tests.
 > **Phase 2 (seat inventory engine)** — atomic seat holds, transactional booking
-> with idempotency, lazy + background hold expiry, an idempotent cleanup job, and
-> realtime seat updates (SSE over PostgreSQL LISTEN/NOTIFY). The engine is
+> with idempotency, lazy + background hold expiry, an idempotent cleanup job,
+> and realtime seat updates (SSE over PostgreSQL LISTEN/NOTIFY). The engine is
 > concurrency-safe under load — see **[docs/CONCURRENCY.md](docs/CONCURRENCY.md)**.
-> Waitlist, QR, and email arrive in later phases (see
-> [docs/DESIGN.md](docs/DESIGN.md) for the full architecture and phase plan).
+> **Phase 3 (waitlist + cancellation + QR/email + frontend)** — transactional
+> booking cancellation that triggers waitlist allocation; FIFO waitlist with
+> secure time-limited offers and safe worker-based expiry (advisory locks +
+> SKIP LOCKED); QR e-tickets and an EmailLog outbox; and the full production
+> frontend — discovery, event detail, live SVG seat map with hold timer, real-time
+> updates, checkout, confirmation with QR, my bookings, waitlist status + offer
+> claim, profile, organiser dashboard (real revenue/tickets/occupancy), and
+> admin dashboard with seat-layout builder.
 
 ---
 

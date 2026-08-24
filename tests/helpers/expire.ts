@@ -15,3 +15,19 @@ export async function expireHold(holdId: string): Promise<void> {
     holdId,
   );
 }
+
+/**
+ * Force a waitlist offer (and its seat hold) to be expired, so the offer-expiry
+ * sweeper will process it on the next run.
+ */
+export async function expireOffer(offerId: string): Promise<void> {
+  const offer = await testDb.waitlistOffer.findUnique({
+    where: { id: offerId },
+    select: { seatHoldId: true },
+  });
+  await testDb.$executeRawUnsafe(
+    `UPDATE waitlist_offers SET expires_at = now() - interval '1 second' WHERE id = $1::uuid`,
+    offerId,
+  );
+  if (offer?.seatHoldId) await expireHold(offer.seatHoldId);
+}

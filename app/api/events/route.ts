@@ -2,6 +2,7 @@ import { handler, parseJson, parseQuery, ok, created } from '@/lib/http';
 import { requireRole } from '@/server/auth/guards';
 import { eventListQuerySchema, createEventSchema } from '@/server/validation/event.schema';
 import { eventService } from '@/server/services/event.service';
+import { eventReadService } from '@/server/services/event-read.service';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -12,7 +13,7 @@ export const dynamic = 'force-dynamic';
  */
 export const GET = handler(async (req) => {
   const query = parseQuery(req, eventListQuerySchema);
-  const result = await eventService.listPublic(query);
+  const result = await eventReadService.listPublic(query);
   return ok(result);
 });
 

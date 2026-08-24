@@ -141,7 +141,7 @@ export const showSeatRepository = {
     return tx.$queryRawUnsafe<{ id: string; show_id: string }[]>(
       `SELECT id, show_id
          FROM seat_holds
-        WHERE status = 'ACTIVE' AND expires_at <= now()
+        WHERE status = 'ACTIVE' AND origin = 'SELECTION' AND expires_at <= now()
         ORDER BY expires_at
         LIMIT $1
         FOR UPDATE SKIP LOCKED`,

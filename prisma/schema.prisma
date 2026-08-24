@@ -443,6 +443,9 @@ model WaitlistOffer {
   showId          String      @map("show_id") @db.Uuid
   seatHoldId      String?     @unique @map("seat_hold_id") @db.Uuid
   bookingId       String?     @map("booking_id") @db.Uuid
+  // Cryptographically-random link token (never the sequential id) used in the
+  // emailed offer URL. Ownership is still enforced by auth on top of this.
+  accessToken     String      @unique @map("access_token")
   status          OfferStatus @default(PENDING)
   expiresAt       DateTime    @map("expires_at") @db.Timestamptz(6)
   createdAt       DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)

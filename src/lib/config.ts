@@ -61,3 +61,7 @@ export function holdTtlSeconds(): number {
 export function offerTtlSeconds(): number {
   return env().OFFER_TTL_SECONDS;
 }
+
+export function cancellationCutoffSeconds(): number {
+  return env().CANCELLATION_CUTOFF_SECONDS;
+}

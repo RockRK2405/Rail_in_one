@@ -23,6 +23,8 @@ const envSchema = z.object({
 
   HOLD_TTL_SECONDS: z.coerce.number().int().positive().default(600),
   OFFER_TTL_SECONDS: z.coerce.number().int().positive().default(600),
+  // How long before a show starts bookings may still be cancelled (default 2h).
+  CANCELLATION_CUTOFF_SECONDS: z.coerce.number().int().nonnegative().default(7200),
 
   CRON_SECRET: z.string().min(1).optional(),
   RESEND_API_KEY: z.string().optional(),

@@ -4,6 +4,7 @@ import { handler, ok } from '@/lib/http';
 import { Errors } from '@/lib/errors';
 import { env } from '@/env';
 import { seatCleanupService } from '@/server/services/seat-cleanup.service';
+import { waitlistService } from '@/server/services/waitlist.service';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -29,8 +30,11 @@ function assertCronAuthorized(req: NextRequest): void {
 
 async function runSweep(req: NextRequest) {
   assertCronAuthorized(req);
-  const result = await seatCleanupService.sweepExpiredHolds();
-  return ok(result);
+  // Expire selection holds first, then expire waitlist offers (which re-allocates
+  // freed seats to the next in line). Both are idempotent and worker-safe.
+  const holds = await seatCleanupService.sweepExpiredHolds();
+  const offers = await waitlistService.expireOffers();
+  return ok({ ...holds, expiredOffers: offers.expired });
 }
 
 // Vercel Cron issues GET; POST is accepted for manual invocation.
