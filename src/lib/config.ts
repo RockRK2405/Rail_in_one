@@ -47,3 +47,17 @@ export function accessTokenTtlSeconds(): number {
 export function refreshTokenTtlSeconds(): number {
   return env().REFRESH_TOKEN_TTL_SECONDS;
 }
+
+/** Seat-hold / waitlist-offer domain configuration. */
+export const SEATS = {
+  /** Maximum number of seats a single hold may cover. */
+  MAX_PER_HOLD: 10,
+} as const;
+
+export function holdTtlSeconds(): number {
+  return env().HOLD_TTL_SECONDS;
+}
+
+export function offerTtlSeconds(): number {
+  return env().OFFER_TTL_SECONDS;
+}

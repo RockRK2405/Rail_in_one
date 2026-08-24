@@ -34,3 +34,20 @@ export async function accessCookieFor(
   const token = await signAccessToken({ sub: user.id, role: user.role });
   return { [COOKIE.ACCESS_TOKEN]: token };
 }
+
+/**
+ * Quickly create N CUSTOMER rows (dummy password hash — these users only need to
+ * exist for FK/auth-token purposes in concurrency tests, not to log in).
+ */
+export async function createCustomers(n: number): Promise<User[]> {
+  const base = `${Date.now()}.${Math.random().toString(36).slice(2)}`;
+  await testDb.user.createMany({
+    data: Array.from({ length: n }, (_, i) => ({
+      email: `load.${base}.${i}@test.local`,
+      passwordHash: 'x',
+      fullName: `Load User ${i}`,
+      role: 'CUSTOMER' as const,
+    })),
+  });
+  return testDb.user.findMany({ where: { email: { startsWith: `load.${base}.` } } });
+}

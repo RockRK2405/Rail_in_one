@@ -36,3 +36,6 @@ npm-debug.log*
 
 # local test env (create from .env.test.example)
 .env.test
+
+# typescript incremental build info
+*.tsbuildinfo

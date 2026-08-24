@@ -7,9 +7,14 @@ offers, QR e-tickets, and role-based access control.
 Built with **Next.js (App Router) · TypeScript · PostgreSQL · Prisma · Tailwind
 CSS · shadcn/ui · Zod · Vitest**.
 
-> **Status: Phase 1 complete** — project foundation, full database schema,
-> authentication + RBAC, seed data, the initial API layer, and tests. Seat
-> holds, booking, realtime, waitlist, QR, and email arrive in later phases (see
+> **Status: Phases 1–2 complete.**
+> **Phase 1** — project foundation, full database schema, authentication + RBAC,
+> seed data, the initial API layer, and tests.
+> **Phase 2 (seat inventory engine)** — atomic seat holds, transactional booking
+> with idempotency, lazy + background hold expiry, an idempotent cleanup job, and
+> realtime seat updates (SSE over PostgreSQL LISTEN/NOTIFY). The engine is
+> concurrency-safe under load — see **[docs/CONCURRENCY.md](docs/CONCURRENCY.md)**.
+> Waitlist, QR, and email arrive in later phases (see
 > [docs/DESIGN.md](docs/DESIGN.md) for the full architecture and phase plan).
 
 ---
@@ -204,11 +209,13 @@ and can never be obtained through public registration.
 | ORGANISER | `organiser@ticketing.test` | `Organiser123!` |
 | CUSTOMER | `customer@ticketing.test` | `Customer123!` |
 
-## API reference (Phase 1)
+## API reference
 
 Base path `/api`. Responses use a consistent envelope: `{ "data": … }` on
 success, `{ "error": { "code", "message", "details"? } }` on failure. Auth is via
 `httpOnly` cookies set on login/register.
+
+**Auth & catalogue (Phase 1)**
 
 | Method | Endpoint | Auth | Role | Description |
 |---|---|---|---|---|
@@ -225,9 +232,21 @@ success, `{ "error": { "code", "message", "details"? } }` on failure. Auth is vi
 | POST | `/admin/venues` | ✔ | ADMIN | Create a venue. `201` / `401` / `403` |
 | GET | `/health` | – | – | Liveness + DB probe. `200` |
 
-Error codes: `VALIDATION_ERROR` (400), `UNAUTHENTICATED` (401),
-`INVALID_CREDENTIALS` (401), `FORBIDDEN` (403), `NOT_FOUND` (404), `CONFLICT` /
-`EMAIL_TAKEN` (409), `RATE_LIMITED` (429), `INTERNAL` (500).
+**Seat inventory engine (Phase 2)** — see [docs/CONCURRENCY.md](docs/CONCURRENCY.md)
+
+| Method | Endpoint | Auth | Role | Description |
+|---|---|---|---|---|
+| GET | `/shows/:showId/seats` | – | – | Full seat map with effective status (expired holds shown AVAILABLE). `200` |
+| GET | `/shows/:showId/stream` | – | – | **SSE** live seat updates (LISTEN/NOTIFY). `text/event-stream` |
+| POST | `/shows/:showId/holds` | ✔ | CUSTOMER | Atomically hold seats (all-or-nothing). `201` / `400 INVALID_SEAT` / `409 SEAT_UNAVAILABLE` |
+| DELETE | `/holds/:holdId` | ✔ | CUSTOMER | Release own hold early. `200` / `403` / `404` |
+| POST | `/holds/:holdId/checkout` | ✔ | CUSTOMER | Convert hold → booking (idempotent via `Idempotency-Key`). `201` / `403 HOLD_NOT_OWNED` / `404 HOLD_NOT_FOUND` / `409 HOLD_EXPIRED` |
+| GET/POST | `/cron/sweep` | secret | – | Expired-hold sweeper (Vercel Cron; `x-cron-secret`/bearer). `200` |
+
+Error codes: `VALIDATION_ERROR` / `INVALID_REQUEST` / `INVALID_SEAT` (400),
+`UNAUTHENTICATED` / `INVALID_CREDENTIALS` (401), `FORBIDDEN` / `HOLD_NOT_OWNED`
+(403), `NOT_FOUND` / `HOLD_NOT_FOUND` (404), `CONFLICT` / `EMAIL_TAKEN` /
+`SEAT_UNAVAILABLE` / `HOLD_EXPIRED` (409), `RATE_LIMITED` (429), `INTERNAL` (500).
 
 ## Project structure
 
