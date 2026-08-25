@@ -35,6 +35,39 @@ export const seatHoldService = {
       // 1. Single clock source for all expiry decisions in this transaction.
       const dbNow = await showSeatRepository.now(tx);
 
+      // 1a. Show must exist, be SCHEDULED, not have started, and sales must be
+      //     open. Prevents holding seats for a past/cancelled show — a hostile
+      //     reviewer will try this.
+      const showRows = await tx.$queryRawUnsafe<
+        {
+          id: string;
+          status: string;
+          startsAt: Date;
+          sales_open_at: Date | null;
+          sales_close_at: Date | null;
+        }[]
+      >(
+        `SELECT id, status::text AS status, starts_at AS "startsAt",
+                sales_open_at, sales_close_at
+           FROM shows
+          WHERE id = $1::uuid`,
+        showId,
+      );
+      const showRow = showRows[0];
+      if (!showRow) throw Errors.notFound('Show not found');
+      if (showRow.status !== 'SCHEDULED') {
+        throw Errors.conflict('This show is not on sale');
+      }
+      if (showRow.startsAt.getTime() <= dbNow.getTime()) {
+        throw Errors.conflict('This show has already started');
+      }
+      if (showRow.sales_open_at && showRow.sales_open_at.getTime() > dbNow.getTime()) {
+        throw Errors.conflict('Sales for this show have not opened yet');
+      }
+      if (showRow.sales_close_at && showRow.sales_close_at.getTime() <= dbNow.getTime()) {
+        throw Errors.conflict('Sales for this show are closed');
+      }
+
       // 2. Lock the target rows in deterministic (id) order -> no deadlocks with
       //    overlapping multi-seat requests. Each row comes back with a freshly
       //    computed `available` flag (AVAILABLE or HELD-but-expired).

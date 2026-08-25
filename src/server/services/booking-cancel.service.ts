@@ -3,6 +3,7 @@ import { cancellationCutoffSeconds } from '@/lib/config';
 import { runInTransaction } from '@/server/db/transaction';
 import { publishSeatUpdates } from '@/server/realtime/seat-events';
 import { waitlistService } from '@/server/services/waitlist.service';
+import { notifications } from '@/server/email/notifications';
 
 /**
  * Booking cancellation (docs/DESIGN.md §3.3). Transactionally releases the
@@ -68,11 +69,14 @@ export const bookingCancelService = {
       };
     });
 
-    // Post-commit: realtime AVAILABLE, then offer freed seats to the waitlist.
+    // Post-commit: realtime AVAILABLE, cancellation email, then offer freed
+    // seats to the waitlist. All side-effects are best-effort — the transaction
+    // has already committed and none of them can undo the cancellation.
     await publishSeatUpdates(
       result.showId,
       result.freedSeatIds.map((id) => ({ showSeatId: id, status: 'AVAILABLE' as const })),
     );
+    await notifications.bookingCancellation(bookingId);
     for (const seatCategoryId of result.freedCategoryIds) {
       await waitlistService.allocateForCategory({ showId: result.showId, seatCategoryId });
     }
