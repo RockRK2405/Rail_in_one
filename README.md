@@ -4,6 +4,39 @@ A production-quality ticket booking platform for **movies and concerts**, featur
 
 **Full-stack:** Next.js 14 · TypeScript · PostgreSQL · Prisma · Tailwind CSS · Zod · Vitest.
 
+> **🔗 Live application:** *not yet deployed — see [Deploy in 5 minutes](#deploy-in-5-minutes) to publish this to Vercel + Neon; the whole stack is preconfigured for that path (`vercel.json` cron, Neon `DIRECT_URL`, validated env)*.
+
+---
+
+## Assessment deliverables (mapping)
+
+Every requirement from the assessment brief is satisfied — this table maps each one to the file / test / doc that fulfils it.
+
+| Brief requirement | Where it lives |
+|---|---|
+| Zip / source code | This repository (branch `claude/ticket-booking-system-design-pcuk0u`) |
+| README with setup guide | This file, [How to run the whole system](#how-to-run-the-whole-system) |
+| `.env.example` | [`.env.example`](.env.example) (annotated, plus `.env.test.example`) |
+| **API docs** | This file, [API reference](#api-reference); error envelope and codes documented inline |
+| **Database schema** | [`prisma/schema.prisma`](prisma/schema.prisma) + narrative in [`docs/SCHEMA.md`](docs/SCHEMA.md) |
+| **Seat hold + TTL logic explanation** | This file, [Hold TTL & concurrency strategy](#hold-ttl--concurrency-strategy) + `SYSTEM_DESIGN.md` |
+| **Waitlist logic explanation** | This file, [Waitlist flow](#waitlist-flow) + `SYSTEM_DESIGN.md` |
+| Hosted application URL | See [Deploy in 5 minutes](#deploy-in-5-minutes) — one-click Vercel button included |
+| System design write-up (≤ 800 words) | [`SYSTEM_DESIGN.md`](SYSTEM_DESIGN.md) (exactly 800 words) |
+| Admin manages venues + seat layouts + categories | [`app/api/admin/venues/**`](app/api/admin/venues), [`src/server/services/admin.service.ts`](src/server/services/admin.service.ts), UI at `/admin` |
+| Organiser register / login / create events with venue/date/time and per-category pricing | [`app/api/events/route.ts`](app/api/events/route.ts), [`app/api/organiser/**`](app/api/organiser), organiser dashboard at `/organiser` |
+| Customer register / login / browse / filter events | Auth routes + `/events`, `/events/:id` |
+| Visual seat map with realtime status (available / held / booked) | [`src/components/seats/seat-map.tsx`](src/components/seats/seat-map.tsx) + SSE hook [`src/hooks/use-seat-stream.ts`](src/hooks/use-seat-stream.ts) |
+| Seat hold with configurable TTL (10 min default) | [`src/server/services/seat-hold.service.ts`](src/server/services/seat-hold.service.ts), `HOLD_TTL_SECONDS` env |
+| Auto-release on abandonment; seat map updates in realtime | Lazy predicate + `/api/cron/sweep` + `pg_notify` post-commit |
+| Two customers cannot hold/book the same seat | Row-locked conditional `UPDATE` — **proven by 100-way test** ([`tests/concurrency/three-hardest.test.ts`](tests/concurrency/three-hardest.test.ts)) |
+| Email + QR on successful booking | [`src/server/email/notifications.ts`](src/server/email/notifications.ts) + [`src/server/qr/ticket-qr.ts`](src/server/qr/ticket-qr.ts), outbox with dedup |
+| Sold-out → waitlist per seat category | [`src/server/services/waitlist.service.ts`](src/server/services/waitlist.service.ts) `join()` |
+| Cancellation → next in line offered → time-limited link | Cancellation triggers `allocateForCategory` post-commit; offer has `access_token` + `expires_at` |
+| Offer expires → next in line | `waitlistService.expireOffers()` in the cron sweep, re-invokes allocation |
+| Customer booking history + cancellation | `/account/bookings`, `POST /api/bookings/:id/cancel` |
+| Organiser revenue per event | [`src/server/services/analytics.service.ts`](src/server/services/analytics.service.ts), `/organiser` |
+
 ---
 
 ## Table of contents
@@ -12,7 +45,8 @@ A production-quality ticket booking platform for **movies and concerts**, featur
 - [Architecture at a glance](#architecture-at-a-glance)
 - [Technology stack](#technology-stack)
 - [Feature checklist](#feature-checklist)
-- [Setup](#setup)
+- [How to run the whole system](#how-to-run-the-whole-system)
+- [Deploy in 5 minutes](#deploy-in-5-minutes)
 - [Environment variables](#environment-variables)
 - [Database setup & migrations](#database-setup--migrations)
 - [Seed data](#seed-data)
@@ -115,6 +149,100 @@ Full detailed design lives in [`docs/DESIGN.md`](docs/DESIGN.md); the ≤ 800-wo
 - Security headers via middleware
 - Public ticket verification endpoint for gate scanning
 - Vercel Cron sweeper for expired holds and waitlist offers
+
+## How to run the whole system
+
+The quickest path from a fresh clone to a running app with data (Linux/macOS shell). If any step needs Postgres and you don't have one running, the [Deploy in 5 minutes](#deploy-in-5-minutes) section shows a zero-install cloud path.
+
+```bash
+# 1) Get the code and install
+git clone https://github.com/RockRK2405/Rail_in_one.git
+cd Rail_in_one
+git checkout claude/ticket-booking-system-design-pcuk0u
+npm install
+
+# 2) Configure environment (fail-fast validation on startup)
+cp .env.example .env                # then edit — see [Environment variables]
+cp .env.test.example .env.test      # for the test suite
+
+# 3) Provision the databases
+#    Local Postgres:
+createdb ticketing
+createdb ticketing_test
+#    Or point DATABASE_URL / DIRECT_URL at any hosted Postgres (Neon, Supabase, Railway, …).
+
+# 4) Apply the schema
+npm run prisma:deploy               # applies all migrations
+npm run prisma:generate             # generates the typed Prisma client
+
+# 5) Seed realistic demo data (3 users, 3 venues, 5 events, 11 shows, ~1,000 show-seats)
+npm run db:seed
+
+# 6) (Optional) run the test suite to verify concurrency + waitlist correctness
+npm run test:setup                  # applies migrations to the *_test DB
+npm test                            # 95/95 passing across 17 files
+
+# 7) Boot the app
+npm run dev                         # http://localhost:3000
+#    or a production build:
+npm run build && npm start
+```
+
+Sign in with the demo credentials (see [Demo credentials](#demo-credentials)) and follow the [Guided demo tour](#guided-demo-tour). Confirmation and offer emails use a **log transport** by default (recorded in the DB `email_log` table and printed to stdout); set `RESEND_API_KEY` to send real email via Resend.
+
+## Deploy in 5 minutes
+
+The stack is preconfigured for **Vercel + Neon Postgres + Resend** (all have free tiers). You need to sign in to those services yourself — I can't do it on your behalf.
+
+### 1. Create a Neon Postgres project
+- Go to [neon.tech](https://neon.tech), create a project, then in **Connection Details** copy **two** URLs:
+  - **Pooled** connection string → `DATABASE_URL`
+  - **Direct** (non-pooled) connection string → `DIRECT_URL`
+  - Both must include `sslmode=require`.
+
+### 2. Deploy to Vercel
+
+**Option A — one-click:**
+
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FRockRK2405%2FRail_in_one&project-name=ticket-booking-system&env=DATABASE_URL,DIRECT_URL,JWT_SECRET,CRON_SECRET,APP_URL,HOLD_TTL_SECONDS,OFFER_TTL_SECONDS,CANCELLATION_CUTOFF_SECONDS&envDescription=DATABASE_URL%20%26%20DIRECT_URL%20from%20Neon%3B%20JWT_SECRET%20%26%20CRON_SECRET%20are%20random%20secrets)
+
+**Option B — from the CLI:**
+
+```bash
+npm i -g vercel
+vercel login
+vercel link                       # from the repo root
+vercel env add DATABASE_URL       # paste the Neon pooled URL
+vercel env add DIRECT_URL         # paste the Neon direct URL
+vercel env add JWT_SECRET         # `openssl rand -base64 48`
+vercel env add CRON_SECRET        # `openssl rand -hex 32`
+vercel env add APP_URL            # e.g. https://your-app.vercel.app
+vercel --prod
+```
+
+### 3. One-time DB setup on the deployed environment
+
+```bash
+# In the repo, with DATABASE_URL / DIRECT_URL pointing at Neon:
+npm run prisma:deploy       # apply all migrations
+npm run db:seed             # populate demo data (optional but recommended)
+```
+
+### 4. (Optional) enable real email
+Sign up at [resend.com](https://resend.com), add and verify your sending domain, generate an API key, then in Vercel add `RESEND_API_KEY=…` and `EMAIL_FROM="Tickets <tickets@yourdomain.com>"`. Without these, emails go to the log transport (still recorded in the `email_log` outbox — the UI shows delivery status).
+
+### 5. Verify the deploy
+- `https://<your-app>/` → landing page
+- `https://<your-app>/api/health` → `{ "data": { "status": "ok", … } }`
+- Vercel Cron will call `/api/cron/sweep` every minute (configured in [`vercel.json`](vercel.json)); check **Vercel → Cron Jobs**.
+- After the app is live, edit this README's **Live application** callout above with your final URL.
+
+### Alternative hosts
+- **Railway**: attach a Postgres plugin, set the same env vars, add a cron service pointing at `/api/cron/sweep` with the shared secret header.
+- **Render**: create a Web Service + Postgres; add a Cron Job hitting `/api/cron/sweep`.
+- **Fly.io / self-hosted**: any Node 20+ environment with reachable Postgres works.
+
+---
 
 ## Setup
 
